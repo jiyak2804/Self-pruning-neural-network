@@ -1,135 +1,255 @@
 # Self-Pruning Neural Network on CIFAR-10
 
 > **Submission for Tredence Analytics — ML Engineering Challenge**  
-> *A feed-forward network that learns to prune its own weights during training using learnable sigmoid gates and L1 sparsity regularization.*
+> A feed-forward neural network that learns to prune its own weights during training using learnable sigmoid gates and sparsity regularization.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jiyak2804/Self-pruning-neural-network/blob/main/Trendence_task.ipynb)
-
----
-
-## Problem Statement
-
-Deploying large neural networks in production is constrained by memory and compute budgets. Standard pruning is a **post-training** step. This project implements a network that **prunes itself during training** — no separate pruning phase required.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jiyak2804/Self-pruning-neural-network/blob/main/self_pruning_nn.ipynb)
 
 ---
 
-## How It Works
+# Problem Statement
 
-### Core Idea — Learnable Gates
+Modern neural networks often contain a large number of redundant parameters, making deployment difficult on memory and compute-constrained devices.
 
-Every weight `w_ij` in the network has a paired learnable scalar `gate_score_ij`. During the forward pass:
+Traditional pruning methods are usually:
+- performed after training,
+- require multiple training stages,
+- and involve separate fine-tuning steps.
 
-```
-gates        = sigmoid(gate_scores)        # squash to (0, 1)
-pruned_weight = weight * gates             # element-wise gate
-output        = pruned_weight @ x + bias   # standard linear op
-```
-
-When a gate collapses to `~0`, the corresponding weight is effectively **removed from the network**. Gradients flow through both `weight` and `gate_scores` via standard autograd.
-
-### Loss Function
-
-```
-Total Loss = CrossEntropy(logits, labels) + λ × SparsityLoss
-```
-
-Where `SparsityLoss = Σ sigmoid(gate_scores)` — the L1 norm of all gate values across every layer.
-
-### Why L1 Encourages Sparsity
-
-The L1 penalty applies a **constant downward gradient** (`-λ`) to every gate, regardless of its current value. This is unlike L2, whose gradient shrinks near zero and never fully eliminates weights. L1's uniform pressure can drive gates to **exactly zero** — the same reason LASSO regression produces sparser solutions than Ridge. The classification loss pushes back, keeping important connections alive. The result: unimportant connections are pruned, important ones survive.
+This project implements a **self-pruning neural network** that learns which connections are important during training itself using learnable gates and sparsity regularization.
 
 ---
 
-## Architecture
+# Core Idea
 
-| Layer | Type | In → Out |
-|-------|------|----------|
+Each weight matrix is paired with a learnable gate matrix.
+
+Instead of directly using weights during forward propagation:
+
+```python
+gates = sigmoid(gate_scores)
+effective_weights = weights * gates
+```
+
+The sigmoid gates control whether a connection remains active or becomes suppressed.
+
+- Gate near `1` → important connection survives
+- Gate near `0` → connection effectively pruned
+
+Because the gates are differentiable, the network can learn pruning behavior through standard backpropagation.
+
+---
+
+# Sparsity Loss
+
+The total training objective is:
+
+```text
+Total Loss = Classification Loss + λ × Sparsity Loss
+```
+
+Where:
+
+```text
+Sparsity Loss = Σ sigmoid(gate_scores)
+```
+
+The sparsity term penalizes open gates and encourages the network to remove unnecessary connections.
+
+---
+
+# Why L1-Style Sparsity Encourages Pruning
+
+The gradient of the sparsity term with respect to each gate score is:
+
+```text
+∂L/∂g = λ × sigmoid(g) × (1 − sigmoid(g))
+```
+
+This gradient consistently pushes gate values downward toward zero.
+
+Meanwhile:
+- the classification loss tries to preserve useful connections,
+- while the sparsity penalty tries to eliminate unnecessary ones.
+
+This competition naturally separates:
+- important connections,
+- from redundant connections.
+
+Unlike L2 regularization, sparsity-based regularization promotes highly sparse solutions where many gates collapse close to zero.
+
+This behavior is conceptually similar to why:
+- **LASSO** performs feature selection,
+- while **Ridge regression** mainly shrinks weights.
+
+---
+
+# Architecture
+
+| Layer | Type | Input → Output |
+|---|---|---|
 | fc1 | PrunableLinear + BN + ReLU | 3072 → 1024 |
 | fc2 | PrunableLinear + BN + ReLU | 1024 → 512 |
 | fc3 | PrunableLinear + BN + ReLU | 512 → 256 |
-| fc4 | PrunableLinear (output) | 256 → 10 |
+| fc4 | PrunableLinear | 256 → 10 |
 
-**Total prunable weights:** ~3.8M  
-**Optimizer:** Adam (lr=1e-3) with StepLR scheduler  
-**Dataset:** CIFAR-10 (50k train / 10k test)
+### Training Details
+
+- Dataset: CIFAR-10
+- Optimizer: Adam
+- Learning Rate: 1e-3
+- Scheduler: StepLR
+- Epochs: 15
+- Framework: PyTorch
 
 ---
 
-## Results
+# Experimental Results
 
-Trained for 15 epochs across three values of λ to demonstrate the sparsity-accuracy trade-off:
+Three experiments were conducted with different sparsity strengths (`λ`) to analyze the sparsity-accuracy tradeoff.
 
 | Lambda (λ) | Test Accuracy | Sparsity Level |
-|------------|:------------:|:--------------:|
-| 1e-5 (low) | ~52% | ~15% |
-| 1e-4 (medium) | ~48% | ~55% |
-| 1e-3 (high) | ~38% | ~90% |
-
-**Key finding:** A higher λ aggressively prunes the network (up to 90% of weights removed) at the cost of accuracy. A medium λ offers the best trade-off — over half the weights pruned with only a modest accuracy drop.
-
-### Gate Distribution (Best Model — λ = 1e-4)
-A successful pruning run produces a **bimodal distribution** of gate values:
-- Large spike near `0` → pruned (inactive) connections
-- Cluster near `0.5–1.0` → active, important connections
+|---|---|---|
+| 0.001 | 56.86% | 60.14% |
+| 0.01 | 57.31% | 71.24% |
+| 0.1 | 56.64% | 72.42% |
 
 ---
 
-## Project Structure
+# Analysis
 
-```
+## λ = 0.001
+- Moderate pruning pressure
+- Around 60% of connections pruned
+- Strong predictive performance maintained
+
+The network successfully removed many redundant connections without significantly harming accuracy.
+
+---
+
+## λ = 0.01
+- Higher sparsity pressure
+- Over 71% sparsity achieved
+- Best overall accuracy observed
+
+This suggests moderate pruning improved generalization by suppressing noisy or less useful connections.
+
+---
+
+## λ = 0.1
+- Aggressive pruning pressure
+- Slight increase in sparsity
+- Small accuracy degradation
+
+At this point the model begins losing useful representational capacity because too many important pathways are weakened.
+
+---
+
+# Gate Distribution Interpretation
+
+A successful pruning run produces a near-bimodal gate distribution:
+
+- Large spike near `0`
+  - inactive/pruned connections
+
+- Cluster near `0.5–1`
+  - active important connections
+
+As λ increases:
+- more gates collapse toward zero,
+- network sparsity increases,
+- and model capacity decreases.
+
+---
+
+# Project Structure
+
+```text
 Self-pruning-neural-network/
-├── Trendence_task.ipynb     # Full implementation — run end to end
-├── README.md                # This file
-├── requirements.txt         # Dependencies
+├── self_pruning_nn.ipynb
+├── README.md
+├── requirements.txt
 └── .gitignore
 ```
 
 ---
 
-## Implementation Highlights
+# Key Components
 
-- **`PrunableLinear`** — custom `nn.Module` replacing `nn.Linear`, with `gate_scores` registered as a learnable parameter
-- **`sparsity_loss()`** — differentiable L1 penalty computed over all `PrunableLinear` layers
-- **`compute_sparsity()`** — evaluation-only hard threshold (`gate < 0.01`) to report pruning percentage
-- **Three λ experiments** — full training runs with curves, gate distributions, and trade-off plots
+## `PrunableLinear`
+Custom PyTorch layer implementing:
+- learnable gate scores,
+- differentiable masking,
+- and gated weight multiplication.
 
 ---
 
-## How to Run
+## `sparsity_loss()`
+Computes sparsity regularization across all gated layers.
 
-### Option 1 — Google Colab (Recommended)
-Click the **Open in Colab** badge above. Run all cells top to bottom. CIFAR-10 downloads automatically.
+---
 
-### Option 2 — Local
+## `compute_sparsity()`
+Calculates percentage of pruned connections using a threshold-based evaluation metric.
+
+---
+
+# How To Run
+
+## Option 1 — Google Colab
+
+Click the Colab badge above and run all cells sequentially.
+
+---
+
+## Option 2 — Local Setup
 
 ```bash
 git clone https://github.com/jiyak2804/Self-pruning-neural-network.git
 cd Self-pruning-neural-network
 pip install -r requirements.txt
-jupyter notebook Trendence_task.ipynb
+jupyter notebook self_pruning_nn.ipynb
 ```
 
 ---
 
-## Requirements
+# Requirements
 
-```
+```text
 torch
 torchvision
-matplotlib
 numpy
+matplotlib
 tqdm
 ```
 
 ---
 
-## Evaluation Criteria Coverage
+# Evaluation Criteria Coverage
 
-| Criterion | Where addressed |
-|-----------|----------------|
-| Correct `PrunableLinear` with gradient flow | Cell 3 — includes assertion check |
-| Custom sparsity loss in training loop | Cell 5 & 6 |
-| Results showing successful self-pruning | Cell 8 — results table + 3 plots |
-| λ trade-off analysis | Cell 10 — report section |
-| Clean, readable code | Docstrings and comments throughout |
+| Requirement | Implementation |
+|---|---|
+| Correct `PrunableLinear` layer | Implemented with differentiable gates |
+| Gradient flow through gates | Verified during training |
+| Sparsity regularization | Included in custom training loss |
+| Successful self-pruning | Demonstrated experimentally |
+| λ tradeoff analysis | Included in report and plots |
+| Clean implementation | Modular PyTorch code with comments |
+
+---
+
+# Conclusion
+
+This project demonstrates that neural networks can learn to prune themselves during training using differentiable gating mechanisms and sparsity regularization.
+
+The best tradeoff occurred near:
+
+```text
+λ = 0.01
+```
+
+where the network achieved:
+- 57.31% test accuracy
+- 71.24% sparsity
+
+This shows that a large fraction of network connections were redundant and could be removed without major loss in predictive performance.
